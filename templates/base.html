@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Bonificação{% endblock %}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen">
+<nav class="bg-indigo-700 text-white shadow">
+  <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+    <a href="{{ url_for('index') }}" class="font-bold text-lg">🎁 Bonificação de Vendas</a>
+    <div class="space-x-4 text-sm">
+      <a href="{{ url_for('index') }}" class="hover:underline">Início</a>
+      <a href="{{ url_for('upload') }}" class="hover:underline">Importar CSV</a>
+      <a href="{{ url_for('clientes') }}" class="hover:underline">Clientes</a>
+    </div>
+  </div>
+</nav>
+
+<main class="max-w-6xl mx-auto px-4 py-6">
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, m in msgs %}
+      <div class="mb-3 px-4 py-3 rounded-lg shadow-sm
+                  {% if cat == 'erro' %}bg-red-100 text-red-800 border border-red-200
+                  {% else %}bg-green-100 text-green-800 border border-green-200{% endif %}">
+        {{ m }}
+      </div>
+    {% endfor %}
+  {% endwith %}
+
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

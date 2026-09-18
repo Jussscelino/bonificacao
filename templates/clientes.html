@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-4">Clientes</h1>
+
+<form method="get" class="mb-4 flex gap-2">
+  <input type="text" name="q" value="{{ busca }}"
+         placeholder="Buscar por nome, documento ou telefone"
+         class="flex-1 border border-slate-300 rounded-lg px-3 py-2">
+  <button class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">Buscar</button>
+</form>
+
+<div class="bg-white rounded-xl shadow overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 text-slate-600">
+      <tr>
+        <th class="text-left px-4 py-3">Nome</th>
+        <th class="text-right">Compras</th>
+        <th class="text-right">Total gasto</th>
+        <th class="text-right">Saldo pontos</th>
+        <th class="text-center">Ações</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in clientes %}
+      <tr class="border-t hover:bg-slate-50">
+        <td class="px-4 py-3 font-medium">{{ c.nome }}</td>
+        <td class="text-right">{{ c.qtd_compras }}</td>
+        <td class="text-right">R$ {{ '%.2f'|format(c.total_gasto) }}</td>
+        <td class="text-right font-bold text-emerald-600">R$ {{ '%.2f'|format(c.saldo) }}</td>
+        <td class="text-center">
+          <a href="{{ url_for('extrato', cid=c.id) }}"
+             class="text-indigo-600 hover:underline font-medium">Extrato</a>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-center py-6 text-slate-400">
+        Nenhum cliente encontrado. Importe um CSV para começar.
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

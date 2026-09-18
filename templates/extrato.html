@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="{{ url_for('clientes') }}" class="text-indigo-600 text-sm">← Voltar para clientes</a>
+
+<h1 class="text-2xl font-bold mt-2 mb-4">{{ cliente['nome'] }}</h1>
+
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+  <div class="bg-white rounded-xl shadow p-4">
+    <div class="text-sm text-slate-500">Total gasto (líquido)</div>
+    <div class="text-2xl font-bold">R$ {{ '%.2f'|format(total_gasto) }}</div>
+  </div>
+  <div class="bg-white rounded-xl shadow p-4">
+    <div class="text-sm text-slate-500">Saldo disponível</div>
+    <div class="text-2xl font-bold text-emerald-600">R$ {{ '%.2f'|format(saldo) }}</div>
+  </div>
+  <div class="bg-white rounded-xl shadow p-4">
+    <div class="text-sm text-slate-500">Identificação</div>
+    <div class="text-lg">{{ cliente['documento'] or '—' }}</div>
+  </div>
+</div>
+
+<div class="bg-white rounded-xl shadow p-5 mb-6">
+  <h2 class="font-bold mb-3">Registrar resgate de pontos</h2>
+  <form method="post" action="{{ url_for('resgatar', cid=cliente['id']) }}" class="flex gap-3">
+    <input type="text" name="valor" placeholder="Valor a resgatar (ex: 10,00)"
+           class="border border-slate-300 rounded-lg px-3 py-2 flex-1">
+    <button class="bg-emerald-600 text-white px-5 py-2 rounded-lg hover:bg-emerald-700">
+      Resgatar
+    </button>
+  </form>
+  <p class="text-xs text-slate-500 mt-2">Saldo máximo permitido: R$ {{ '%.2f'|format(saldo) }}</p>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+  <div class="bg-white rounded-xl shadow p-5">
+    <h2 class="font-bold mb-3">Histórico de pontos</h2>
+    <div class="max-h-96 overflow-y-auto">
+      <table class="w-full text-sm">
+        <thead class="text-slate-500 border-b sticky top-0 bg-white">
+          <tr>
+            <th class="text-left py-2">Data</th>
+            <th class="text-left">Descrição</th>
+            <th class="text-right">Valor</th>
+            <th class="text-right">Expira em</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in movimentos %}
+          <tr class="border-b">
+            <td class="py-2 text-slate-600">{{ m['data_movimento'][:10] }}</td>
+            <td>{{ m['descricao'] }}</td>
+            <td class="text-right font-medium
+                       {% if m['tipo'] == 'credito' %}text-emerald-600
+                       {% else %}text-red-600{% endif %}">
+              {% if m['tipo'] == 'credito' %}+{% else %}−{% endif %}R$ {{ '%.2f'|format(m['pontos']) }}
+            </td>
+            <td class="text-right text-slate-500 text-xs">{{ m['data_expiracao'] or '—' }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="text-center py-4 text-slate-400">Sem movimentos.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="bg-white rounded-xl shadow p-5">
+    <h2 class="font-bold mb-3">Compras registradas</h2>
+    <div class="max-h-96 overflow-y-auto">
+      <table class="w-full text-sm">
+        <thead class="text-slate-500 border-b sticky top-0 bg-white">
+          <tr>
+            <th class="text-left py-2">Venda</th>
+            <th class="text-left">Data</th>
+            <th class="text-left">Loja</th>
+            <th class="text-right">Valor</th>
+            <th class="text-right">Pontos</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for v in vendas %}
+          <tr class="border-b">
+            <td class="py-2">{{ v['numero_venda'] }}</td>
+            <td class="text-slate-600">{{ v['data_venda'] }}</td>
+            <td class="text-slate-600">{{ v['loja'] }}</td>
+            <td class="text-right">R$ {{ '%.2f'|format(v['valor_liquido']) }}</td>
+            <td class="text-right text-emerald-600">+R$ {{ '%.2f'|format(v['pontos_gerados']) }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="text-center py-4 text-slate-400">Sem compras.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

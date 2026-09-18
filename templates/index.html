@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Painel Geral</h1>
+
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+  <div class="bg-white rounded-xl shadow p-5">
+    <div class="text-sm text-slate-500">Clientes cadastrados</div>
+    <div class="text-3xl font-bold text-indigo-700">{{ total_clientes }}</div>
+  </div>
+  <div class="bg-white rounded-xl shadow p-5">
+    <div class="text-sm text-slate-500">Vendas registradas</div>
+    <div class="text-3xl font-bold text-indigo-700">{{ total_vendas }}</div>
+  </div>
+  <div class="bg-white rounded-xl shadow p-5">
+    <div class="text-sm text-slate-500">Total vendido (líquido)</div>
+    <div class="text-3xl font-bold text-emerald-600">R$ {{ '%.2f'|format(total_valor) }}</div>
+  </div>
+  <div class="bg-white rounded-xl shadow p-5">
+    <div class="text-sm text-slate-500">Saldo em pontos</div>
+    <div class="text-3xl font-bold text-amber-600">R$ {{ '%.2f'|format(saldo_total) }}</div>
+  </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+  <div class="bg-white rounded-xl shadow p-5">
+    <h2 class="font-bold mb-3">Vendas por loja</h2>
+    <table class="w-full text-sm">
+      <thead class="text-slate-500 border-b">
+        <tr>
+          <th class="text-left py-2">Loja</th>
+          <th class="text-right">Qtd</th>
+          <th class="text-right">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in por_loja %}
+        <tr class="border-b">
+          <td class="py-2 font-medium">{{ l['loja'] or '—' }}</td>
+          <td class="text-right">{{ l['qtd'] }}</td>
+          <td class="text-right">R$ {{ '%.2f'|format(l['total']) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="text-center py-3 text-slate-400">Sem dados.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="bg-white rounded-xl shadow p-5">
+    <h2 class="font-bold mb-3">Últimos lotes importados</h2>
+    <table class="w-full text-sm">
+      <thead class="text-slate-500 border-b">
+        <tr>
+          <th class="text-left py-2">Arquivo</th>
+          <th class="text-left">Período</th>
+          <th class="text-right">Reg.</th>
+          <th class="text-center">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in lotes %}
+        <tr class="border-b">
+          <td class="py-2">{{ l['nome_arquivo'] }}</td>
+          <td class="text-xs text-slate-500">
+            {{ l['periodo_inicio'] or '—' }}<br>a {{ l['periodo_fim'] or '—' }}
+          </td>
+          <td class="text-right">{{ l['total_registros'] }}</td>
+          <td class="text-center">
+            {% if l['ativo'] %}<span class="text-green-600 font-medium">Ativo</span>
+            {% else %}<span class="text-slate-400">Substituído</span>{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="text-center py-3 text-slate-400">Nenhum lote.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

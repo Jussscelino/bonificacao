@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Importar CSV de Vendas</h1>
+
+{% if duplicado %}
+<div class="bg-yellow-50 border border-yellow-300 text-yellow-900 p-5 rounded-xl mb-5 max-w-2xl">
+  <h2 class="font-bold mb-2 text-lg">⚠️ CSV já importado anteriormente</h2>
+  <p class="text-sm mb-2">
+    Este arquivo (hash idêntico) já foi computado em
+    <strong>{{ lote['importado_em'] }}</strong> —
+    {{ lote['total_registros'] }} registros,
+    total R$ {{ '%.2f'|format(lote['total_valor']) }}.
+  </p>
+  <p class="text-sm mb-4">
+    Se você substituir, <strong>os pontos gerados por essas vendas serão removidos</strong>
+    (resgates já feitos sobre elas ficarão órfãos no extrato).
+    Deseja realmente substituir?
+  </p>
+
+  <form method="post" enctype="multipart/form-data" class="flex gap-3">
+    <input type="hidden" name="confirmar" value="1">
+    <input type="file" name="arquivo" id="fileHidden" class="hidden">
+    <button type="button" onclick="reenviar()"
+            class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700">
+      Sim, substituir
+    </button>
+    <a href="{{ url_for('upload') }}"
+       class="bg-slate-300 px-4 py-2 rounded-lg hover:bg-slate-400">Cancelar</a>
+  </form>
+</div>
+
+<script>
+function reenviar() {
+  const bytes = new Uint8Array("{{ conteudo_hex }}".match(/.{1,2}/g).map(h => parseInt(h, 16)));
+  const blob = new Blob([bytes], { type: "text/csv" });
+  const file = new File([blob], "{{ nome_arquivo }}", { type: "text/csv" });
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  document.getElementById("fileHidden").files = dt.files;
+  document.getElementById("fileHidden").form.submit();
+}
+</script>
+
+{% else %}
+
+<div class="bg-white rounded-xl shadow p-6 max-w-2xl">
+  <p class="text-slate-600 mb-4 text-sm leading-relaxed">
+    Envie o arquivo <strong>RelVendaPorData.csv</strong> gerado pelo seu sistema.
+    O formato esperado é:
+  </p>
+  <code class="block bg-slate-100 px-3 py-2 rounded text-xs mb-4 overflow-x-auto whitespace-nowrap">
+    "venda";"cliente";"valor_bruto";"desconto";"valor_líquido";"loja";"pagamento";"data_hora"
+  </code>
+  <ul class="text-sm text-slate-600 space-y-1 mb-5 list-disc list-inside">
+    <li>Os pontos são calculados sobre o <strong>valor líquido</strong> (após desconto).</li>
+    <li>Regra: <strong>1%</strong> do valor vira bonificação.</li>
+    <li>Validade dos pontos: <strong>1 ano</strong> a partir da data da venda.</li>
+    <li>Vendas de <strong>CONSUMIDOR FINAL</strong> não geram pontos.</li>
+    <li>Arquivos repetidos são detectados e avisados antes de substituir.</li>
+  </ul>
+
+  <form method="post" enctype="multipart/form-data" class="space-y-4">
+    <input type="file" name="arquivo" accept=".csv" required
+           class="block w-full border border-slate-300 rounded-lg p-3 bg-slate-50 text-sm">
+    <div class="flex gap-3">
+      <button class="bg-indigo-600 text-white px-5 py-2 rounded-lg hover:bg-indigo-700">
+        Importar CSV
+      </button>
+      <a href="{{ url_for('modelo_csv') }}"
+         class="bg-slate-200 px-5 py-2 rounded-lg hover:bg-slate-300">
+        Baixar exemplo
+      </a>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
