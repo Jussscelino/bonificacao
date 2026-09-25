@@ -1,505 +1,473 @@
-import os
+import streamlit as st
+import pandas as pd
 import sqlite3
 import hashlib
-import csv
 import io
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file
+import re
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "dados.db")
+# =========================================================
+# CONFIGURAÇÃO DA PÁGINA
+# =========================================================
+st.set_page_config(
+    page_title="Bonificação de Vendas",
+    page_icon="🎁",
+    layout="wide"
+)
 
-app = Flask(__name__)
-app.secret_key = "troque-esta-chave-secreta-por-uma-aleatoria"
-
-# ============================================================
-# CONFIGURAÇÕES DO NEGÓCIO
-# ============================================================
-PERCENTUAL_PONTOS = 0.01          # 1% do valor vira bonificação
-DIAS_VALIDADE_PONTOS = 365        # validade de 1 ano
-NOME_CONSUMIDOR_FINAL = "CONSUMIDOR FINAL"
-PONTUAR_CONSUMIDOR_FINAL = False  # se True, "CONSUMIDOR FINAL" também ganha pontos
-
-# ============================================================
+# =========================================================
 # BANCO DE DADOS
-# ============================================================
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-    return g.db
+# =========================================================
+DB_NAME = "bonificacao.db"
 
-@app.teardown_appcontext
-def close_db(exc):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+def get_conn():
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    cur = db.cursor()
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS admin (
+            id INTEGER PRIMARY KEY,
+            usuario TEXT UNIQUE,
+            senha_hash TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS vendas (
+            id INTEGER PRIMARY KEY,
+            numero_venda TEXT UNIQUE,
+            cliente TEXT,
+            valor_total REAL,
+            bonificacao REAL,
+            data_venda TEXT,
+            data_upload TEXT,
+            mes_referencia TEXT,
+            hash_arquivo TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS resgates (
+            id INTEGER PRIMARY KEY,
+            cliente TEXT,
+            valor REAL,
+            observacao TEXT,
+            data_resgate TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS uploads (
+            id INTEGER PRIMARY KEY,
+            nome_arquivo TEXT,
+            mes_referencia TEXT,
+            hash_arquivo TEXT UNIQUE,
+            data_upload TEXT
+        )
+    """)
+    # Admin padrão: admin / admin123
+    c.execute("SELECT COUNT(*) FROM admin")
+    if c.fetchone()[0] == 0:
+        senha_hash = hashlib.sha256("admin123".encode()).hexdigest()
+        c.execute("INSERT INTO admin (usuario, senha_hash) VALUES (?, ?)",
+                  ("admin", senha_hash))
+    conn.commit()
+    conn.close()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS clientes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL,
-        documento TEXT,
-        telefone TEXT,
-        criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
+# =========================================================
+# FUNÇÕES AUXILIARES
+# =========================================================
+def hash_arquivo(conteudo_bytes):
+    return hashlib.md5(conteudo_bytes).hexdigest()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS lotes_csv (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome_arquivo TEXT,
-        hash_arquivo TEXT UNIQUE,
-        total_registros INTEGER DEFAULT 0,
-        total_valor REAL DEFAULT 0,
-        periodo_inicio TEXT,
-        periodo_fim TEXT,
-        importado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-        ativo INTEGER DEFAULT 1
-    )""")
+def parse_data_br(txt):
+    """Converte '01/08/2026  11:11:13' para datetime"""
+    txt = re.sub(r'\s+', ' ', txt.strip())
+    return datetime.strptime(txt, "%d/%m/%Y %H:%M:%S")
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS vendas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        numero_venda TEXT UNIQUE,
-        cliente_id INTEGER,
-        cliente_nome TEXT,
-        loja TEXT,
-        forma_pagamento TEXT,
-        valor_bruto REAL,
-        desconto REAL,
-        valor_liquido REAL,
-        data_venda TEXT,
-        lote_id INTEGER,
-        pontos_gerados REAL,
-        FOREIGN KEY(cliente_id) REFERENCES clientes(id),
-        FOREIGN KEY(lote_id) REFERENCES lotes_csv(id)
-    )""")
+def parse_valor_br(txt):
+    """Converte '1.234,50' ou '3,50' para float"""
+    txt = str(txt).strip().replace(".", "").replace(",", ".")
+    return float(txt)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS movimentos_pontos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        cliente_id INTEGER,
-        pontos REAL,
-        tipo TEXT,
-        descricao TEXT,
-        data_movimento TEXT DEFAULT CURRENT_TIMESTAMP,
-        data_expiracao TEXT,
-        venda_id INTEGER,
-        FOREIGN KEY(cliente_id) REFERENCES clientes(id)
-    )""")
-
-    db.commit()
-    db.close()
-
-# ============================================================
-# HELPERS
-# ============================================================
-def hash_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def to_float(valor_str):
-    """Converte '1.234,56' ou '1,50' ou '10.5' em float."""
-    if valor_str is None:
-        return 0.0
-    s = str(valor_str).strip().replace('"', '')
-    if not s:
-        return 0.0
-    # Se tem vírgula, assume padrão brasileiro
-    if "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        return 0.0
-
-def parse_data_hora(s):
-    """Aceita 'DD/MM/AAAA HH:MM:SS' ou só data."""
-    if not s:
-        return datetime.now().strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    s = str(s).strip().replace('"', '')
-    formatos = [
-        ("%d/%m/%Y %H:%M:%S", True),
-        ("%d/%m/%Y %H:%M", True),
-        ("%d/%m/%Y", False),
-        ("%Y-%m-%d %H:%M:%S", True),
-        ("%Y-%m-%d", False),
-    ]
-    for fmt, tem_hora in formatos:
-        try:
-            dt = datetime.strptime(s, fmt)
-            return dt.strftime("%Y-%m-%d"), dt.strftime("%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            continue
+def calcular_saldo_cliente(cliente):
+    """Saldo = soma de bonificações válidas - resgates"""
+    conn = get_conn()
     hoje = datetime.now()
-    return hoje.strftime("%Y-%m-%d"), hoje.strftime("%Y-%m-%d %H:%M:%S")
+    um_ano_atras = hoje - timedelta(days=365)
+    data_corte = um_ano_atras.strftime("%Y-%m-%d")
 
-def calcular_saldo_cliente(db, cliente_id):
-    """Saldo atual, aplicando expiração automática."""
-    hoje = datetime.now().strftime("%Y-%m-%d")
-    cur = db.cursor()
-    cur.execute("""
-        UPDATE movimentos_pontos
-        SET tipo = 'expiracao'
-        WHERE cliente_id = ?
-          AND tipo = 'credito'
-          AND data_expiracao IS NOT NULL
-          AND data_expiracao < ?
-    """, (cliente_id, hoje))
-    db.commit()
+    c = conn.cursor()
+    # Bonificações válidas (venda dentro do último ano)
+    c.execute("""
+        SELECT COALESCE(SUM(bonificacao), 0) FROM vendas
+        WHERE cliente = ? AND data_venda >= ?
+    """, (cliente, data_corte))
+    total_bonif = c.fetchone()[0]
 
-    cur.execute("""
-        SELECT COALESCE(SUM(
-            CASE WHEN tipo = 'credito' THEN pontos
-                 WHEN tipo IN ('resgate','expiracao') THEN -ABS(pontos)
-                 ELSE 0 END
-        ), 0) AS saldo
-        FROM movimentos_pontos
-        WHERE cliente_id = ?
-    """, (cliente_id,))
-    return float(cur.fetchone()["saldo"] or 0)
+    # Resgates feitos
+    c.execute("""
+        SELECT COALESCE(SUM(valor), 0) FROM resgates WHERE cliente = ?
+    """, (cliente,))
+    total_resg = c.fetchone()[0]
 
-def obter_ou_criar_cliente(db, nome):
-    """Busca por nome exato (case-insensitive) ou cria."""
-    cur = db.cursor()
-    cur.execute("SELECT id FROM clientes WHERE UPPER(nome) = UPPER(?)", (nome,))
-    row = cur.fetchone()
-    if row:
-        return row["id"]
-    cur.execute("INSERT INTO clientes (nome) VALUES (?)", (nome,))
-    return cur.lastrowid
+    conn.close()
+    return round(total_bonif - total_resg, 2)
 
-# ============================================================
-# LEITOR DO CSV ESPECÍFICO DO SISTEMA
-# ============================================================
-def ler_csv_vendas(conteudo_bytes):
-    """
-    Lê o CSV no formato RelVendaPorData.csv:
-    "venda";"cliente";"valor_bruto";"desconto";"valor_liquido";"loja";"pagamento";"data_hora"
-    Retorna lista de dicionários.
-    """
-    try:
-        texto = conteudo_bytes.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        texto = conteudo_bytes.decode("latin-1")
+def listar_clientes_com_saldo():
+    conn = get_conn()
+    hoje = datetime.now()
+    um_ano_atras = hoje - timedelta(days=365)
+    data_corte = um_ano_atras.strftime("%Y-%m-%d")
 
-    # Detecta delimitador: se tem ';' usa ';', senão ','
-    primeira_linha = texto.splitlines()[0] if texto.splitlines() else ""
-    delim = ";" if ";" in primeira_linha else ","
+    df = pd.read_sql_query("""
+        SELECT cliente,
+               SUM(bonificacao) as total_ganho,
+               COUNT(*) as qtd_compras
+        FROM vendas
+        WHERE data_venda >= ?
+        GROUP BY cliente
+        ORDER BY total_ganho DESC
+    """, conn, params=(data_corte,))
+    conn.close()
+    return df
 
-    leitor = csv.reader(io.StringIO(texto), delimiter=delim)
-    vendas = []
+# =========================================================
+# LOGIN
+# =========================================================
+def tela_login():
+    st.title("🔐 Área do Administrador")
+    st.markdown("Faça login para acessar o sistema de bonificação.")
 
-    for i, linha in enumerate(leitor):
-        if not linha or all(not c.strip() for c in linha):
-            continue
-
-        # Pula cabeçalho se a primeira célula não for numérica
-        if i == 0 and not linha[0].strip().strip('"').replace(".", "").isdigit():
-            continue
-
-        # Aceita 8 colunas (formato padrão)
-        if len(linha) < 5:
-            continue
-
-        numero = linha[0].strip().strip('"')
-        cliente = linha[1].strip().strip('"') if len(linha) > 1 else ""
-
-        valor_bruto = to_float(linha[2]) if len(linha) > 2 else 0.0
-        desconto    = to_float(linha[3]) if len(linha) > 3 else 0.0
-        valor_liq   = to_float(linha[4]) if len(linha) > 4 else valor_bruto - desconto
-        loja        = linha[5].strip().strip('"') if len(linha) > 5 else ""
-        pagamento   = linha[6].strip().strip('"') if len(linha) > 6 else ""
-        data_hora   = linha[7] if len(linha) > 7 else ""
-
-        data_iso, data_hora_iso = parse_data_hora(data_hora)
-
-        vendas.append({
-            "numero": numero,
-            "cliente": cliente,
-            "valor_bruto": valor_bruto,
-            "desconto": desconto,
-            "valor_liquido": valor_liq,
-            "loja": loja,
-            "pagamento": pagamento,
-            "data": data_iso,
-            "data_hora": data_hora_iso,
-        })
-
-    return vendas
-
-# ============================================================
-# ROTAS
-# ============================================================
-@app.route("/")
-def index():
-    db = get_db()
-    cur = db.cursor()
-
-    cur.execute("SELECT COUNT(*) AS n FROM clientes")
-    total_clientes = cur.fetchone()["n"]
-
-    cur.execute("SELECT COUNT(*) AS n, COALESCE(SUM(valor_liquido),0) AS v FROM vendas")
-    row = cur.fetchone()
-    total_vendas = row["n"]
-    total_valor = float(row["v"] or 0)
-
-    cur.execute("SELECT COUNT(*) AS n FROM lotes_csv WHERE ativo = 1")
-    total_lotes = cur.fetchone()["n"]
-
-    cur.execute("""
-        SELECT COALESCE(SUM(
-            CASE WHEN tipo='credito' THEN pontos
-                 WHEN tipo IN ('resgate','expiracao') THEN -ABS(pontos)
-                 ELSE 0 END
-        ),0) AS s FROM movimentos_pontos
-    """)
-    saldo_total = float(cur.fetchone()["s"] or 0)
-
-    cur.execute("SELECT * FROM lotes_csv ORDER BY id DESC LIMIT 20")
-    lotes = cur.fetchall()
-
-    # Totais por loja
-    cur.execute("""
-        SELECT loja, COUNT(*) AS qtd, COALESCE(SUM(valor_liquido),0) AS total
-        FROM vendas GROUP BY loja ORDER BY total DESC
-    """)
-    por_loja = cur.fetchall()
-
-    return render_template("index.html",
-                           total_clientes=total_clientes,
-                           total_vendas=total_vendas,
-                           total_valor=total_valor,
-                           total_lotes=total_lotes,
-                           saldo_total=saldo_total,
-                           lotes=lotes,
-                           por_loja=por_loja)
-
-@app.route("/upload", methods=["GET", "POST"])
-def upload():
-    if request.method == "POST":
-        arquivo = request.files.get("arquivo")
-        if not arquivo or arquivo.filename == "":
-            flash("Selecione um arquivo CSV.", "erro")
-            return redirect(url_for("upload"))
-
-        conteudo = arquivo.read()
-        if not conteudo:
-            flash("Arquivo vazio.", "erro")
-            return redirect(url_for("upload"))
-
-        hash_arq = hash_bytes(conteudo)
-        confirmar = request.form.get("confirmar") == "1"
-
-        db = get_db()
-        cur = db.cursor()
-
-        cur.execute("SELECT * FROM lotes_csv WHERE hash_arquivo = ?", (hash_arq,))
-        lote_existente = cur.fetchone()
-
-        # CSV idêntico já importado → pergunta antes de substituir
-        if lote_existente and not confirmar:
-            return render_template("upload.html",
-                                   duplicado=True,
-                                   lote=lote_existente,
-                                   nome_arquivo=arquivo.filename,
-                                   conteudo_hex=conteudo.hex())
-
-        # Parse
-        vendas = ler_csv_vendas(conteudo)
-        if not vendas:
-            flash("Nenhuma venda válida encontrada no CSV. "
-                  "Verifique se o arquivo está no formato RelVendaPorData.", "erro")
-            return redirect(url_for("upload"))
-
-        # Se confirmou substituição, apaga lote antigo e movimentos vinculados
-        if lote_existente and confirmar:
-            cur.execute("""
-                DELETE FROM movimentos_pontos
-                WHERE venda_id IN (SELECT id FROM vendas WHERE lote_id = ?)
-            """, (lote_existente["id"],))
-            cur.execute("DELETE FROM vendas WHERE lote_id = ?", (lote_existente["id"],))
-            cur.execute("DELETE FROM lotes_csv WHERE id = ?", (lote_existente["id"],))
-            db.commit()
-
-        # Cria novo lote
-        datas = sorted(v["data"] for v in vendas)
-        cur.execute("""
-            INSERT INTO lotes_csv (nome_arquivo, hash_arquivo, periodo_inicio, periodo_fim, ativo)
-            VALUES (?, ?, ?, ?, 1)
-        """, (arquivo.filename, hash_arq, datas[0], datas[-1],))
-        lote_id = cur.lastrowid
-
-        total_reg = 0
-        total_val = 0.0
-        ignorados = 0
-        sem_pontos = 0
-
-        for v in vendas:
-            # Venda já existe em outro lote? ignora
-            cur.execute("SELECT id FROM vendas WHERE numero_venda = ?", (v["numero"],))
-            if cur.fetchone():
-                ignorados += 1
-                continue
-
-            cliente_nome = v["cliente"].strip()
-            pontua = True
-
-            # "CONSUMIDOR FINAL" → não pontua (a menos que configurado)
-            if (not PONTUAR_CONSUMIDOR_FINAL and
-                    cliente_nome.upper() == NOME_CONSUMIDOR_FINAL):
-                pontua = False
-
-            cliente_id = obter_ou_criar_cliente(db, cliente_nome) if pontua else None
-
-            pontos = round(v["valor_liquido"] * PERCENTUAL_PONTOS, 2) if pontua else 0.0
-
-            if pontua:
-                expiracao = (datetime.strptime(v["data"], "%Y-%m-%d") +
-                             timedelta(days=DIAS_VALIDADE_PONTOS)).strftime("%Y-%m-%d")
+    with st.form("login_form"):
+        usuario = st.text_input("Usuário")
+        senha = st.text_input("Senha", type="password")
+        submitted = st.form_submit_button("Entrar")
+        if submitted:
+            conn = get_conn()
+            c = conn.cursor()
+            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
+            c.execute("SELECT * FROM admin WHERE usuario=? AND senha_hash=?",
+                      (usuario, senha_hash))
+            user = c.fetchone()
+            conn.close()
+            if user:
+                st.session_state["logado"] = True
+                st.session_state["usuario"] = usuario
+                st.rerun()
             else:
-                expiracao = None
-                sem_pontos += 1
+                st.error("❌ Usuário ou senha incorretos.")
 
-            cur.execute("""
-                INSERT INTO vendas
-                (numero_venda, cliente_id, cliente_nome, loja, forma_pagamento,
-                 valor_bruto, desconto, valor_liquido, data_venda, lote_id, pontos_gerados)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (v["numero"], cliente_id, cliente_nome, v["loja"], v["pagamento"],
-                  v["valor_bruto"], v["desconto"], v["valor_liquido"],
-                  v["data"], lote_id, pontos))
-            venda_id = cur.lastrowid
+    st.info("👤 Usuário padrão: **admin** | Senha: **admin123**")
 
-            if pontua and pontos > 0:
-                cur.execute("""
-                    INSERT INTO movimentos_pontos
-                    (cliente_id, pontos, tipo, descricao, data_expiracao, venda_id)
-                    VALUES (?, ?, 'credito', ?, ?, ?)
-                """, (cliente_id, pontos,
-                      f"Compra #{v['numero']} — {v['loja']} ({v['data']})",
-                      expiracao, venda_id))
+# =========================================================
+# DASHBOARD
+# =========================================================
+def tela_dashboard():
+    st.title("📊 Dashboard")
 
-            total_reg += 1
-            total_val += v["valor_liquido"]
+    conn = get_conn()
+    hoje = datetime.now()
+    um_ano_atras = hoje - timedelta(days=365)
+    data_corte = um_ano_atras.strftime("%Y-%m-%d")
 
-        cur.execute("""UPDATE lotes_csv
-                       SET total_registros=?, total_valor=? WHERE id=?""",
-                    (total_reg, total_val, lote_id))
-        db.commit()
+    # Métricas
+    total_vendas = pd.read_sql_query(
+        "SELECT COALESCE(SUM(valor_total),0) as t, COUNT(*) as q FROM vendas WHERE data_venda >= ?",
+        conn, params=(data_corte,)
+    ).iloc[0]
+    total_bonif = pd.read_sql_query(
+        "SELECT COALESCE(SUM(bonificacao),0) as t FROM vendas WHERE data_venda >= ?",
+        conn, params=(data_corte,)
+    ).iloc[0]["t"]
+    total_resg = pd.read_sql_query(
+        "SELECT COALESCE(SUM(valor),0) as t FROM resgates", conn
+    ).iloc[0]["t"]
+    qtd_clientes = pd.read_sql_query(
+        "SELECT COUNT(DISTINCT cliente) as t FROM vendas WHERE data_venda >= ?",
+        conn, params=(data_corte,)
+    ).iloc[0]["t"]
+    conn.close()
 
-        msg = f"CSV importado: {total_reg} vendas computadas (R$ {total_val:.2f})."
-        if ignorados:
-            msg += f" {ignorados} vendas já existiam e foram ignoradas."
-        if sem_pontos:
-            msg += f" {sem_pontos} vendas de '{NOME_CONSUMIDOR_FINAL}' não geraram pontos."
-        flash(msg, "ok")
-        return redirect(url_for("index"))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💰 Total Vendido (ano)", f"R$ {total_vendas['t']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c2.metric("🎁 Bonificação Gerada", f"R$ {total_bonif:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c3.metric("✅ Total Resgatado", f"R$ {total_resg:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c4.metric("👥 Clientes Ativos", qtd_clientes)
 
-    return render_template("upload.html", duplicado=False)
-
-@app.route("/clientes")
-def clientes():
-    db = get_db()
-    cur = db.cursor()
-    busca = request.args.get("q", "").strip()
-
-    sql_base = """
-        SELECT c.id, c.nome, c.documento, c.telefone,
-               COALESCE((SELECT SUM(valor_liquido) FROM vendas v WHERE v.cliente_id=c.id),0) AS total_gasto,
-               COALESCE((SELECT COUNT(*)        FROM vendas v WHERE v.cliente_id=c.id),0) AS qtd_compras
-        FROM clientes c
-    """
-
-    if busca:
-        cur.execute(sql_base + """
-            WHERE c.nome LIKE ? OR c.telefone LIKE ? OR c.documento LIKE ?
-            ORDER BY total_gasto DESC
-        """, (f"%{busca}%", f"%{busca}%", f"%{busca}%"))
+    st.markdown("---")
+    st.subheader("🏆 Top 10 Clientes (últimos 12 meses)")
+    df = listar_clientes_com_saldo().head(10)
+    if df.empty:
+        st.info("Nenhuma venda registrada ainda.")
     else:
-        cur.execute(sql_base + " ORDER BY total_gasto DESC")
+        df["saldo_atual"] = df["cliente"].apply(calcular_saldo_cliente)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    linhas = cur.fetchall()
-    lista = []
-    for c in linhas:
-        saldo = calcular_saldo_cliente(db, c["id"])
-        lista.append({
-            "id": c["id"],
-            "nome": c["nome"],
-            "documento": c["documento"],
-            "telefone": c["telefone"],
-            "total_gasto": float(c["total_gasto"] or 0),
-            "qtd_compras": c["qtd_compras"],
-            "saldo": saldo,
-        })
+# =========================================================
+# UPLOAD CSV
+# =========================================================
+def tela_upload():
+    st.title("📤 Upload de Vendas do Mês")
+    st.markdown("Faça o upload do arquivo CSV gerado pelo seu sistema de vendas.")
 
-    return render_template("clientes.html", clientes=lista, busca=busca)
+    arquivo = st.file_uploader("Selecione o arquivo CSV", type=["csv"])
 
-@app.route("/cliente/<int:cid>")
-def extrato(cid):
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT * FROM clientes WHERE id = ?", (cid,))
-    cliente = cur.fetchone()
-    if not cliente:
-        flash("Cliente não encontrado.", "erro")
-        return redirect(url_for("clientes"))
+    if arquivo is not None:
+        conteudo = arquivo.read()
+        h = hash_arquivo(conteudo)
 
-    cur.execute("""SELECT * FROM movimentos_pontos
-                   WHERE cliente_id = ? ORDER BY id DESC""", (cid,))
-    movs = cur.fetchall()
+        # Verifica duplicidade
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("SELECT nome_arquivo, mes_referencia, data_upload FROM uploads WHERE hash_arquivo=?", (h,))
+        duplicado = c.fetchone()
+        conn.close()
 
-    cur.execute("""SELECT * FROM vendas
-                   WHERE cliente_id = ? ORDER BY data_venda DESC""", (cid,))
-    vendas = cur.fetchall()
+        if duplicado:
+            st.warning(f"⚠️ Este arquivo **já foi processado** em {duplicado['data_upload']} "
+                       f"(mês: {duplicado['mes_referencia']}).")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 Substituir dados antigos"):
+                    processar_csv(conteudo, arquivo.name, h, substituir=True)
+                    st.rerun()
+            with col2:
+                if st.button("❌ Cancelar"):
+                    st.rerun()
+            return
 
-    saldo = calcular_saldo_cliente(db, cid)
-    total_gasto = sum(float(v["valor_liquido"] or 0) for v in vendas)
+        # Pré-visualização
+        try:
+            df = pd.read_csv(io.BytesIO(conteudo), sep=";", header=None, encoding="utf-8")
+        except Exception:
+            df = pd.read_csv(io.BytesIO(conteudo), sep=";", header=None, encoding="latin1")
 
-    return render_template("extrato.html",
-                           cliente=cliente, movimentos=movs, vendas=vendas,
-                           saldo=saldo, total_gasto=total_gasto)
+        st.markdown("### 📋 Pré-visualização")
+        st.dataframe(df.head(10), use_container_width=True)
+        st.info(f"Total de {len(df)} vendas no arquivo.")
 
-@app.route("/cliente/<int:cid>/resgatar", methods=["POST"])
-def resgatar(cid):
-    db = get_db()
-    valor = to_float(request.form.get("valor", "0"))
-    saldo = calcular_saldo_cliente(db, cid)
+        mes_ref = st.text_input("Mês de referência (ex: **Agosto/2026**)",
+                                value=datetime.now().strftime("%B/%Y").capitalize())
 
-    if valor <= 0:
-        flash("Informe um valor maior que zero.", "erro")
-        return redirect(url_for("extrato", cid=cid))
-    if valor > saldo + 0.001:
-        flash(f"Saldo insuficiente. Disponível: R$ {saldo:.2f}", "erro")
-        return redirect(url_for("extrato", cid=cid))
+        if st.button("✅ Confirmar e Processar Upload"):
+            processar_csv(conteudo, arquivo.name, h, mes_ref)
+            st.rerun()
 
-    cur = db.cursor()
-    cur.execute("""
-        INSERT INTO movimentos_pontos (cliente_id, pontos, tipo, descricao)
-        VALUES (?, ?, 'resgate', ?)
-    """, (cid, valor, f"Resgate em mercadoria — R$ {valor:.2f}"))
-    db.commit()
+def processar_csv(conteudo, nome_arquivo, h, mes_ref=None, substituir=False):
+    conn = get_conn()
+    c = conn.cursor()
 
-    flash(f"Resgate de R$ {valor:.2f} registrado com sucesso.", "ok")
-    return redirect(url_for("extrato", cid=cid))
+    if substituir:
+        c.execute("DELETE FROM vendas WHERE hash_arquivo=?", (h,))
+        c.execute("DELETE FROM uploads WHERE hash_arquivo=?", (h,))
 
-@app.route("/modelo.csv")
-def modelo_csv():
-    """Baixa um CSV de exemplo no mesmo formato do seu sistema."""
-    conteudo = (
-        '"00425";"CONSUMIDOR FINAL";"3,50";"0,00";"3,50";"APOLLO32";"A VISTA";"01/08/2026  11:11:13"\n'
-        '"00516";"FRANCISCO GERSON ARCANJO ALVES";"750,00";"0,00";"750,00";"JUSCELINO";"A VISTA";"15/08/2026  10:51:01"\n'
-        '"00595";"JOSE EVANEI MARQUES";"55,00";"0,00";"55,00";"APOLLO32";"PIX";"31/08/2026  10:32:37"\n'
+    if mes_ref is None:
+        mes_ref = datetime.now().strftime("%B/%Y").capitalize()
+
+    try:
+        df = pd.read_csv(io.BytesIO(conteudo), sep=";", header=None, encoding="utf-8")
+    except Exception:
+        df = pd.read_csv(io.BytesIO(conteudo), sep=";", header=None, encoding="latin1")
+
+    data_upload = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    inseridas = 0
+    duplicadas = 0
+
+    for _, row in df.iterrows():
+        try:
+            numero = str(row[0]).strip()
+            cliente = str(row[1]).strip().title()
+            valor_total = parse_valor_br(row[4])
+            data_venda = parse_data_br(str(row[7])).strftime("%Y-%m-%d")
+            bonificacao = round(valor_total * 0.01, 2)
+
+            c.execute("""
+                INSERT OR IGNORE INTO vendas
+                (numero_venda, cliente, valor_total, bonificacao, data_venda,
+                 data_upload, mes_referencia, hash_arquivo)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (numero, cliente, valor_total, bonificacao, data_venda,
+                  data_upload, mes_ref, h))
+            if c.rowcount > 0:
+                inseridas += 1
+            else:
+                duplicadas += 1
+        except Exception as e:
+            st.error(f"Erro na linha: {row} — {e}")
+
+    c.execute("""
+        INSERT OR REPLACE INTO uploads
+        (nome_arquivo, mes_referencia, hash_arquivo, data_upload)
+        VALUES (?, ?, ?, ?)
+    """, (nome_arquivo, mes_ref, h, data_upload))
+
+    conn.commit()
+    conn.close()
+
+    st.success(f"✅ **{inseridas}** vendas processadas com sucesso!")
+    if duplicadas:
+        st.info(f"ℹ️ {duplicadas} vendas já existiam e foram ignoradas.")
+
+# =========================================================
+# CONSULTA CLIENTE
+# =========================================================
+def tela_consulta():
+    st.title("🔍 Consulta de Cliente")
+    st.markdown("Digite o nome do cliente para ver o extrato completo.")
+
+    conn = get_conn()
+    clientes = pd.read_sql_query(
+        "SELECT DISTINCT cliente FROM vendas ORDER BY cliente", conn
+    )["cliente"].tolist()
+    conn.close()
+
+    busca = st.text_input("Nome do cliente")
+    if busca:
+        clientes_filtrados = [c for c in clientes if busca.upper() in c.upper()]
+        if not clientes_filtrados:
+            st.warning("Nenhum cliente encontrado.")
+            return
+        cliente = st.selectbox("Selecione o cliente", clientes_filtrados)
+    else:
+        cliente = st.selectbox("Selecione o cliente", [""] + clientes)
+        if not cliente:
+            return
+
+    # Dados do cliente
+    conn = get_conn()
+    df_vendas = pd.read_sql_query(
+        "SELECT * FROM vendas WHERE cliente=? ORDER BY data_venda DESC",
+        conn, params=(cliente,)
     )
-    return send_file(io.BytesIO(conteudo.encode("utf-8-sig")),
-                     mimetype="text/csv; charset=utf-8",
-                     as_attachment=True,
-                     download_name="modelo_vendas.csv")
+    df_resg = pd.read_sql_query(
+        "SELECT * FROM resgates WHERE cliente=? ORDER BY data_resgate DESC",
+        conn, params=(cliente,)
+    )
+    conn.close()
 
-# ============================================================
-if __name__ == "__main__":
+    saldo = calcular_saldo_cliente(cliente)
+    total_gasto = df_vendas["valor_total"].sum() if not df_vendas.empty else 0
+    total_bonif = df_vendas["bonificacao"].sum() if not df_vendas.empty else 0
+    total_resg = df_resg["valor"].sum() if not df_resg.empty else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💰 Total Gasto", f"R$ {total_gasto:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c2.metric("🎁 Bonificação Gerada", f"R$ {total_bonif:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c3.metric("✅ Resgatado", f"R$ {total_resg:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c4.metric("🟢 Saldo Atual", f"R$ {saldo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+    st.markdown("---")
+    tab1, tab2 = st.tabs(["🛒 Histórico de Compras", "🎁 Histórico de Resgates"])
+
+    with tab1:
+        if df_vendas.empty:
+            st.info("Sem compras registradas.")
+        else:
+            st.dataframe(df_vendas[["numero_venda", "data_venda", "valor_total",
+                                     "bonificacao", "mes_referencia"]],
+                         use_container_width=True, hide_index=True)
+
+    with tab2:
+        if df_resg.empty:
+            st.info("Sem resgates registrados.")
+        else:
+            st.dataframe(df_resg, use_container_width=True, hide_index=True)
+
+# =========================================================
+# RESGATAR PONTOS
+# =========================================================
+def tela_resgate():
+    st.title("🎁 Resgatar Bonificação")
+
+    conn = get_conn()
+    clientes = pd.read_sql_query(
+        "SELECT DISTINCT cliente FROM vendas ORDER BY cliente", conn
+    )["cliente"].tolist()
+    conn.close()
+
+    cliente = st.selectbox("Cliente", [""] + clientes)
+    if not cliente:
+        return
+
+    saldo = calcular_saldo_cliente(cliente)
+    st.info(f"💰 Saldo disponível de **{cliente}**: **R$ {saldo:,.2f}**".replace(".", ","))
+
+    if saldo <= 0:
+        st.warning("Este cliente não possui saldo para resgatar.")
+        return
+
+    valor = st.number_input("Valor a resgatar (R$)", min_value=0.01,
+                            max_value=float(saldo), step=0.01, format="%.2f")
+    obs = st.text_input("Observação (opcional)", placeholder="Ex: Trocou por 1 produto X")
+
+    if st.button("✅ Confirmar Resgate"):
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO resgates (cliente, valor, observacao, data_resgate)
+            VALUES (?, ?, ?, ?)
+        """, (cliente, float(valor), obs,
+              datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+        st.success(f"✅ Resgate de R$ {valor:,.2f} registrado com sucesso!")
+        st.balloons()
+        st.rerun()
+
+# =========================================================
+# HISTÓRICO DE UPLOADS
+# =========================================================
+def tela_historico():
+    st.title("📜 Histórico de Uploads")
+    conn = get_conn()
+    df = pd.read_sql_query(
+        "SELECT nome_arquivo, mes_referencia, data_upload FROM uploads ORDER BY data_upload DESC",
+        conn
+    )
+    conn.close()
+
+    if df.empty:
+        st.info("Nenhum upload realizado ainda.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+# =========================================================
+# NAVEGAÇÃO
+# =========================================================
+def main():
     init_db()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+
+    if "logado" not in st.session_state:
+        st.session_state["logado"] = False
+
+    if not st.session_state["logado"]:
+        tela_login()
+        return
+
+    with st.sidebar:
+        st.markdown(f"### 👤 {st.session_state.get('usuario', '')}")
+        menu = st.radio(
+            "Menu",
+            ["📊 Dashboard", "📤 Upload CSV", "🔍 Consulta Cliente",
+             "🎁 Resgatar Pontos", "📜 Histórico"],
+            index=0
+        )
+        if st.button("🚪 Sair"):
+            st.session_state["logado"] = False
+            st.rerun()
+
+    if menu.startswith("📊"):
+        tela_dashboard()
+    elif menu.startswith("📤"):
+        tela_upload()
+    elif menu.startswith("🔍"):
+        tela_consulta()
+    elif menu.startswith("🎁"):
+        tela_resgate()
+    elif menu.startswith("📜"):
+        tela_historico()
+
+if __name__ == "__main__":
+    main()
